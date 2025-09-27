@@ -375,10 +375,10 @@ class ROSEAuditGUI:
             # Create comprehensive results
             results_summary = {
                 'location_flags': len(location_flags),
-                'story_flags': len(story_flags),
+                'story_flags': len([f for f in story_flags if f['authenticity_score'] < 70]),
                 'delay_flags': len(delay_flags),
-                'income_flags': len(income_flags),
-                'temporal_flags': len(temporal_flags),
+                'income_flags': len([f for f in income_flags if f['suspicious_score'] > 30]),
+                'temporal_flags': len([f for f in temporal_flags if f['temporal_suspicion_score'] > 30]),
                 'total_visits': total_visits,
                 'total_trainers': total_trainers,
                 'low_confidence_visits': len([v for v in visit_scores if v['confidence_score'] < 60]),
@@ -388,9 +388,9 @@ class ROSEAuditGUI:
             # Save results to CSV files
             output_files = []
             
-            # 1. Visit Scores CSV
+            # 1. Visit Scores CSV (with detailed explanations)
             visit_df = pd.DataFrame(visit_scores)
-            visit_file = os.path.join(self.output_folder.get(), f"visit_confidence_scores_{timestamp}.csv")
+            visit_file = os.path.join(self.output_folder.get(), f"visit_confidence_detailed_{timestamp}.csv")
             visit_df.to_csv(visit_file, index=False)
             output_files.append(visit_file)
             
@@ -400,47 +400,71 @@ class ROSEAuditGUI:
             trainer_df.to_csv(trainer_file, index=False)
             output_files.append(trainer_file)
             
-            # 3. Detailed Flags CSV
+            # 3. Detailed Flags CSV - Only include actual anomalies
             flags_data = []
             
-            # Add location flags
+            # Add location flags - only if there are actual similarities
             for flag in location_flags:
-                flags_data.append({
-                    'Flag_Type': 'Location_Similarity',
-                    'Trainer': flag['trainer'],
-                    'Severity': 'HIGH' if flag['similarity_percentage'] > 0.5 else 'MEDIUM',
-                    'Details': f"Similarity: {flag['similarity_percentage']:.1%}, Pairs: {flag['flagged_pairs']}"
-                })
+                if flag['similarity_percentage'] > 0.1:  # Only flag real similarities
+                    flags_data.append({
+                        'Flag_Type': 'Location_Similarity',
+                        'Trainer': flag['trainer'],
+                        'Severity': 'HIGH' if flag['similarity_percentage'] > 0.5 else 'MEDIUM',
+                        'Details': f"Similar locations found in {flag['similarity_percentage']:.1%} of visit pairs ({flag['flagged_pairs']} pairs out of {flag['total_visits']} visits)",
+                        'Recommendation': 'Call random beneficiaries to verify visit locations'
+                    })
             
-            # Add story flags
+            # Add story flags - only if authenticity is low (anomalies)
             for flag in story_flags:
-                severity = 'HIGH' if flag['authenticity_score'] < 30 else 'MEDIUM' if flag['authenticity_score'] < 60 else 'LOW'
-                flags_data.append({
-                    'Flag_Type': 'Story_Similarity',
-                    'Trainer': flag['trainer'],
-                    'Severity': severity,
-                    'Details': f"Authenticity: {flag['authenticity_score']:.1f}%, Similar pairs: {len(flag['similar_stories'])}"
-                })
+                if flag['authenticity_score'] < 70:  # Only flag low authenticity scores
+                    severity = 'HIGH' if flag['authenticity_score'] < 30 else 'MEDIUM' if flag['authenticity_score'] < 60 else 'LOW'
+                    flags_data.append({
+                        'Flag_Type': 'Story_Similarity',
+                        'Trainer': flag['trainer'],
+                        'Severity': severity,
+                        'Details': f"Story authenticity only {flag['authenticity_score']:.1f}% ({len(flag['similar_stories'])} similar story pairs found)",
+                        'Recommendation': 'Review stories manually and verify with beneficiaries'
+                    })
             
-            # Add income flags
+            # Add income flags - only suspicious patterns
             for flag in income_flags:
-                severity = 'HIGH' if flag['suspicious_score'] > 70 else 'MEDIUM' if flag['suspicious_score'] > 40 else 'LOW'
-                flags_data.append({
-                    'Flag_Type': 'Income_Anomaly',
-                    'Trainer': flag['trainer'],
-                    'Severity': severity,
-                    'Details': f"Suspicion: {flag['suspicious_score']:.1f}%, Extreme growth: {flag['extreme_growth_count']}"
-                })
+                if flag['suspicious_score'] > 30:  # Only flag actual suspicious patterns
+                    severity = 'HIGH' if flag['suspicious_score'] > 70 else 'MEDIUM' if flag['suspicious_score'] > 40 else 'LOW'
+                    details_parts = []
+                    if flag['extreme_growth_count'] > 0:
+                        details_parts.append(f"{flag['extreme_growth_count']} extreme growth rates")
+                    if flag['growth_diversity'] < 0.5:
+                        details_parts.append("low growth diversity (possible copy-paste)")
+                    if flag['round_numbers_percentage'] > 0.7:
+                        details_parts.append(f"{flag['round_numbers_percentage']:.0%} round numbers")
+                    
+                    flags_data.append({
+                        'Flag_Type': 'Income_Anomaly',
+                        'Trainer': flag['trainer'],
+                        'Severity': severity,
+                        'Details': f"Income suspicion score {flag['suspicious_score']:.1f}%: " + ", ".join(details_parts),
+                        'Recommendation': 'Verify income figures with beneficiaries and request supporting documents'
+                    })
             
-            # Add temporal flags
+            # Add temporal flags - only actual clustering issues
             for flag in temporal_flags:
-                severity = 'HIGH' if flag['temporal_suspicion_score'] > 70 else 'MEDIUM' if flag['temporal_suspicion_score'] > 40 else 'LOW'
-                flags_data.append({
-                    'Flag_Type': 'Temporal_Clustering',
-                    'Trainer': flag['trainer'],
-                    'Severity': severity,
-                    'Details': f"Suspicion: {flag['temporal_suspicion_score']:.1f}%, Monday visits: {flag['monday_percentage']:.1f}%"
-                })
+                if flag['temporal_suspicion_score'] > 30:  # Only flag actual temporal issues
+                    severity = 'HIGH' if flag['temporal_suspicion_score'] > 70 else 'MEDIUM' if flag['temporal_suspicion_score'] > 40 else 'LOW'
+                    details_parts = []
+                    if flag['monday_percentage'] > 20:
+                        details_parts.append(f"{flag['monday_percentage']:.0f}% Monday visits")
+                    if flag['hour_clustering_score'] > 0.3:
+                        details_parts.append(f"concentrated at {flag['most_common_hour']}:00")
+                    if flag['batch_upload_score'] > 0.4:
+                        details_parts.append("batch uploading pattern")
+                    
+                    flags_data.append({
+                        'Flag_Type': 'Temporal_Clustering',
+                        'Trainer': flag['trainer'],
+                        'Severity': severity,
+                        'Details': f"Temporal suspicion {flag['temporal_suspicion_score']:.1f}%: " + ", ".join(details_parts),
+                        'Recommendation': 'Review visit scheduling and verify actual visit times'
+                    })
             
             if flags_data:
                 flags_df = pd.DataFrame(flags_data)
@@ -448,15 +472,11 @@ class ROSEAuditGUI:
                 flags_df.to_csv(flags_file, index=False)
                 output_files.append(flags_file)
             
-            # 4. Summary Report CSV
-            summary_df = pd.DataFrame([results_summary])
-            summary_file = os.path.join(self.output_folder.get(), f"audit_summary_{timestamp}.csv")
-            summary_df.to_csv(summary_file, index=False)
-            output_files.append(summary_file)
+            # No longer generating audit summary - removed per user feedback
             
             self.update_progress(100, "Audit completed successfully!")
             
-            # Display final results
+            # Display final results with phone numbers for suspicious visits
             self.update_results_preview("=" * 60)
             self.update_results_preview("🎉 AUDIT COMPLETED SUCCESSFULLY!")
             self.update_results_preview("=" * 60)
@@ -468,6 +488,15 @@ class ROSEAuditGUI:
             self.update_results_preview(f"⏰ Temporal flags: {results_summary['temporal_flags']}")
             self.update_results_preview(f"⚠️  Low confidence visits: {results_summary['low_confidence_visits']}")
             self.update_results_preview(f"🔴 High priority trainers: {results_summary['high_priority_trainers']}")
+            
+            # Show some examples of suspicious visits with phone numbers
+            suspicious_visits = [v for v in visit_scores if v['confidence_score'] < 70 and v['beneficiary_phone']][:5]
+            if suspicious_visits:
+                self.update_results_preview("")
+                self.update_results_preview("📞 SUSPICIOUS VISITS FOR IMMEDIATE CALL-BACK:")
+                for visit in suspicious_visits:
+                    self.update_results_preview(f"   • {visit['account_name']} ({visit['beneficiary_phone']}) - {visit['confidence_score']:.1f}% confidence")
+            
             self.update_results_preview("")
             self.update_results_preview("📁 OUTPUT FILES GENERATED:")
             for file in output_files:
@@ -480,7 +509,8 @@ class ROSEAuditGUI:
                 f"Generated {len(output_files)} CSV files in:\n{self.output_folder.get()}\n\n"
                 f"Key findings:\n"
                 f"• {results_summary['low_confidence_visits']} low confidence visits\n"
-                f"• {results_summary['high_priority_trainers']} high priority trainers for audit"
+                f"• {results_summary['high_priority_trainers']} high priority trainers for audit\n"
+                f"• {len([f for f in flags_data if f.get('Severity') == 'HIGH'])} high-severity flags detected"
             ))
             
         except Exception as e:
