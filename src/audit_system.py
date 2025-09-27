@@ -2,8 +2,9 @@ from geopy.distance import geodesic
 import pandas as pd
 
 class VisitAuditSystem:
-    def __init__(self, df):
+    def __init__(self, df, similarity_threshold=150):
         self.df = df
+        self.similarity_threshold = similarity_threshold
 
     def audit_location_similarity(self):
         """
@@ -62,7 +63,7 @@ class VisitAuditSystem:
                                 'coordinates': coord
                             })
 
-            # Check for "too close" visits (<150m apart)
+            # Check for "too close" visits (<self.similarity_threshold m apart)
             for i, row1 in trainer_visits.iterrows():
                 for j, row2 in trainer_visits.iterrows():
                     if i >= j:
@@ -72,7 +73,7 @@ class VisitAuditSystem:
                     if pd.isna(lat1) or pd.isna(lon1) or pd.isna(lat2) or pd.isna(lon2):
                         continue
                     distance = geodesic((lat1, lon1), (lat2, lon2)).meters
-                    if distance < 150:
+                    if distance < self.similarity_threshold:
                         similar_locations.append({
                             'visit_1_index': i,
                             'visit_2_index': j,
