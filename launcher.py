@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 # launcher.py - Easy launcher for ROSE Audit System
 """
 Launcher script for ROSE Audit System
@@ -164,8 +165,10 @@ def main():
     launch_gui()
 
 if __name__ == "__main__":
-    # If you just want to run GUI:
+    import argparse
+    parser = argparse.ArgumentParser(description="ROSE Audit System Launcher")
+    parser.add_argument('--make-launchers', action='store_true', help='Regenerate launch scripts')
+    args = parser.parse_args()
     main()
-
-    # If you also want to regenerate .bat/.sh launchers automatically:
-    # create_launcher_files()
+    if args.make_launchers:
+        create_launcher_files()
