@@ -459,7 +459,7 @@ class VisitAuditSystem:
     
     def calculate_visit_confidence(self):
         """
-        Calculate confidence score for each individual visit
+        Calculate confidence score for each individual visit with detailed explanations
         """
         visit_scores = []
         
@@ -473,30 +473,44 @@ class VisitAuditSystem:
         for _, visit in self.df.iterrows():
             trainer = visit['Visitation: Created By']
             confidence_score = 100  # Start with full confidence
+            score_breakdown = []
             
             # Location confidence penalty
             if trainer in location_flags:
-                confidence_score -= location_flags[trainer]['similarity_percentage'] * 30
+                penalty = location_flags[trainer]['similarity_percentage'] * 30
+                confidence_score -= penalty
+                if penalty > 0:
+                    score_breakdown.append(f"Location similarity issue (-{penalty:.1f})")
             
             # Story confidence penalty
             if trainer in story_flags:
                 story_authenticity = story_flags[trainer]['authenticity_score']
-                confidence_score -= (100 - story_authenticity) * 0.3
+                penalty = (100 - story_authenticity) * 0.3
+                confidence_score -= penalty
+                if penalty > 2:  # Only mention if significant
+                    score_breakdown.append(f"Story authenticity concern (-{penalty:.1f})")
             
             # Upload delay penalty
             if visit['Upload Delay Days'] > self.upload_delay_threshold:
                 delay_penalty = min((visit['Upload Delay Days'] / self.upload_delay_threshold) * 20, 40)
                 confidence_score -= delay_penalty
+                score_breakdown.append(f"Late upload ({visit['Upload Delay Days']:.0f} days, -{delay_penalty:.1f})")
             
             # Income anomaly penalty
             if trainer in income_flags:
                 income_suspicion = income_flags[trainer]['suspicious_score']
-                confidence_score -= income_suspicion * 0.2
+                penalty = income_suspicion * 0.2
+                confidence_score -= penalty
+                if penalty > 2:  # Only mention if significant
+                    score_breakdown.append(f"Income pattern concerns (-{penalty:.1f})")
             
             # Temporal clustering penalty
             if trainer in temporal_flags:
                 temporal_suspicion = temporal_flags[trainer]['temporal_suspicion_score']
-                confidence_score -= temporal_suspicion * 0.15
+                penalty = temporal_suspicion * 0.15
+                confidence_score -= penalty
+                if penalty > 2:  # Only mention if significant
+                    score_breakdown.append(f"Timing pattern issues (-{penalty:.1f})")
             
             # Data completeness bonus/penalty
             required_fields = ['Account Name', 'Story Summary', 'Visit Location (Latitude)', 
@@ -505,12 +519,46 @@ class VisitAuditSystem:
             completeness_score = (complete_fields / len(required_fields)) * 10
             confidence_score += completeness_score
             
+            if complete_fields < len(required_fields):
+                missing_count = len(required_fields) - complete_fields
+                score_breakdown.append(f"Missing {missing_count} required field(s) (-{10-completeness_score:.1f})")
+            
+            # Create explanation
+            if not score_breakdown:
+                explanation = "No issues detected - all checks passed"
+            else:
+                explanation = "; ".join(score_breakdown)
+            
+            # Determine overall assessment and include phone for suspicious visits
+            final_score = max(0, min(100, confidence_score))
+            phone_number = visit.get('Phone', '')  # Get phone number from data
+            
+            if final_score >= 80:
+                assessment = "HIGH CONFIDENCE"
+                # No phone needed for high confidence visits
+                display_phone = ""
+            elif final_score >= 60:
+                assessment = "MEDIUM CONFIDENCE"
+                # Include phone for medium confidence (may need verification)
+                display_phone = phone_number if phone_number else "Phone not available"
+            else:
+                assessment = "LOW CONFIDENCE - Requires Review"
+                # Definitely include phone for low confidence visits
+                display_phone = phone_number if phone_number else "Phone not available"
+            
             visit_scores.append({
                 'visit_index': visit.name,
                 'trainer': trainer,
                 'account_name': visit['Account Name'],
                 'visit_date': visit['Visitation Date'],
-                'confidence_score': max(0, min(100, confidence_score))  # Clamp to 0-100
+                'confidence_score': final_score,
+                'confidence_assessment': assessment,
+                'score_explanation': explanation,
+                'beneficiary_phone': display_phone,
+                'upload_delay_days': visit.get('Upload Delay Days', 0),
+                'story_length': len(str(visit['Story Summary'])) if pd.notna(visit['Story Summary']) else 0,
+                'program_cohort': visit.get('Program Cohort', ''),
+                'business_sector': visit.get('Business Sector', '')
             })
         
         return visit_scores
