@@ -403,15 +403,31 @@ class ROSEAuditGUI:
             # 3. Detailed Flags CSV - Only include actual anomalies
             flags_data = []
             
-            # Add location flags - only if there are actual similarities
+            # Add location flags - only if there are actual anomalies
             for flag in location_flags:
-                if flag['similarity_percentage'] > 0.1:  # Only flag real similarities
+                location_concerns = flag.get('location_concerns', {})
+                flag_issues = []
+                severity = 'LOW'
+                
+                if location_concerns.get('different_beneficiaries_too_close'):
+                    flag_issues.append(f"{flag['flagged_similar_beneficiaries']} beneficiary pairs within 150m")
+                    severity = 'HIGH'
+                
+                if location_concerns.get('same_beneficiary_inconsistent'): 
+                    flag_issues.append(f"{flag['flagged_inconsistent_visits']} beneficiary location inconsistencies")
+                    severity = 'MEDIUM' if severity == 'LOW' else severity
+                
+                if location_concerns.get('coordinates_outside_kenya'):
+                    flag_issues.append(f"{flag['flagged_out_of_country']} visits outside Kenya")
+                    severity = 'HIGH'
+                
+                if flag_issues:
                     flags_data.append({
-                        'Flag_Type': 'Location_Similarity',
+                        'Flag_Type': 'Location_Anomaly',
                         'Trainer': flag['trainer'],
-                        'Severity': 'HIGH' if flag['similarity_percentage'] > 0.5 else 'MEDIUM',
-                        'Details': f"Similar locations found in {flag['similarity_percentage']:.1%} of visit pairs ({flag['flagged_pairs']} pairs out of {flag['total_visits']} visits)",
-                        'Recommendation': 'Call random beneficiaries to verify visit locations'
+                        'Severity': severity,
+                        'Details': f"Location issues found: {'; '.join(flag_issues)} across {flag['total_beneficiaries']} beneficiaries",
+                        'Recommendation': 'Call beneficiaries to verify actual visit locations and GPS accuracy'
                     })
             
             # Add story flags - only if authenticity is low (anomalies)
