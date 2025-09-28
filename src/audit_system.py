@@ -68,8 +68,10 @@ class VisitAuditSystem:
 
     def audit_location_similarity(self):
         """
-        Detect suspiciously similar or anomalous visit locations by trainer
-        - Flags repeated/very close coordinates
+        Enhanced location audit considering beneficiary visits and stages:
+        - Expects similar locations for same beneficiary across visits (Visit 1, 2, 3+)
+        - Flags different beneficiaries with suspiciously similar locations (<150m apart)
+        - Flags Visit 1 locations that don't match subsequent visits for same beneficiary
         - Flags coordinates outside Kenya bounding box
         """
         location_flags = []
@@ -84,74 +86,146 @@ class VisitAuditSystem:
             if len(trainer_visits) < 2:
                 continue
 
-            similar_locations = []
-            repeated_locations = {}
-            out_of_country = []
+            # Clean and prepare data
+            trainer_visits['Visit Location (Latitude)'] = pd.to_numeric(trainer_visits['Visit Location (Latitude)'], errors='coerce')
+            trainer_visits['Visit Location (Longitude)'] = pd.to_numeric(trainer_visits['Visit Location (Longitude)'], errors='coerce')
+            trainer_visits['Account Name'] = trainer_visits['Account Name'].fillna('Unknown')
+            trainer_visits['Stage'] = trainer_visits['Stage'].fillna('Unknown')
 
-            # Check for out-of-country anomalies
-            for i, row in trainer_visits.iterrows():
+            # Remove rows with missing coordinate data
+            valid_visits = trainer_visits.dropna(subset=['Visit Location (Latitude)', 'Visit Location (Longitude)'])
+            
+            if len(valid_visits) < 2:
+                continue
+
+            suspicious_patterns = []
+            out_of_country = []
+            cross_beneficiary_similarities = []
+            within_beneficiary_inconsistencies = []
+
+            # 1. Check for out-of-country coordinates
+            for i, row in valid_visits.iterrows():
                 lat, lon = row['Visit Location (Latitude)'], row['Visit Location (Longitude)']
-                if pd.isna(lat) or pd.isna(lon):
-                    continue
                 if not (kenya_lat_min <= lat <= kenya_lat_max and kenya_lon_min <= lon <= kenya_lon_max):
                     out_of_country.append({
                         'visit_index': i,
                         'account': row['Account Name'],
+                        'stage': row['Stage'],
                         'coordinates': (lat, lon),
-                        'reason': "Outside Kenya"
+                        'reason': "Outside Kenya boundaries"
                     })
 
-            # Track repeated coordinates (identical within ~1m)
-            for i, row1 in trainer_visits.iterrows():
-                lat1, lon1 = row1['Visit Location (Latitude)'], row1['Visit Location (Longitude)']
-                if pd.isna(lat1) or pd.isna(lon1):
-                    continue
-                coord_key = (round(lat1, 5), round(lon1, 5))
-                repeated_locations.setdefault(coord_key, []).append(i)
+            # 2. Group visits by beneficiary (Account Name)
+            beneficiary_groups = valid_visits.groupby('Account Name')
+            beneficiary_locations = {}
 
-            for coord, idxs in repeated_locations.items():
-                if len(idxs) > 1:
-                    for i in range(len(idxs)):
-                        for j in range(i + 1, len(idxs)):
-                            row1 = trainer_visits.loc[idxs[i]]
-                            row2 = trainer_visits.loc[idxs[j]]
-                            similar_locations.append({
-                                'visit_1_index': idxs[i],
-                                'visit_2_index': idxs[j],
-                                'distance_meters': 0,
-                                'accounts': f"{row1['Account Name']} & {row2['Account Name']}",
-                                'coordinates': coord
-                            })
+            # 3. Check within-beneficiary location consistency
+            for beneficiary, beneficiary_visits in beneficiary_groups:
+                beneficiary_coords = []
+                
+                for _, visit in beneficiary_visits.iterrows():
+                    lat, lon = visit['Visit Location (Latitude)'], visit['Visit Location (Longitude)']
+                    stage = visit['Stage']
+                    beneficiary_coords.append({
+                        'lat': lat,
+                        'lon': lon,
+                        'stage': stage,
+                        'visit_index': visit.name,
+                        'visit_date': visit.get('Visitation Date', 'Unknown')
+                    })
+                
+                # Store average location for cross-beneficiary comparison
+                if beneficiary_coords:
+                    avg_lat = sum(coord['lat'] for coord in beneficiary_coords) / len(beneficiary_coords)
+                    avg_lon = sum(coord['lon'] for coord in beneficiary_coords) / len(beneficiary_coords)
+                    beneficiary_locations[beneficiary] = {
+                        'avg_lat': avg_lat,
+                        'avg_lon': avg_lon,
+                        'visits': beneficiary_coords,
+                        'visit_count': len(beneficiary_coords)
+                    }
 
-            # Check for "too close" visits (<location_threshold_meters apart)
-            for i, row1 in trainer_visits.iterrows():
-                for j, row2 in trainer_visits.iterrows():
-                    if i >= j:
+                # Check for inconsistencies within same beneficiary visits
+                if len(beneficiary_coords) > 1:
+                    for i, coord1 in enumerate(beneficiary_coords):
+                        for j, coord2 in enumerate(beneficiary_coords):
+                            if i >= j:
+                                continue
+                            
+                            distance = geodesic((coord1['lat'], coord1['lon']), 
+                                              (coord2['lat'], coord2['lon'])).meters
+                            
+                            # Flag if same beneficiary visits are too far apart (>500m)
+                            # This could indicate fake visits or wrong coordinates
+                            if distance > 500:
+                                within_beneficiary_inconsistencies.append({
+                                    'beneficiary': beneficiary,
+                                    'visit_1_index': coord1['visit_index'],
+                                    'visit_2_index': coord2['visit_index'],
+                                    'stage_1': coord1['stage'],
+                                    'stage_2': coord2['stage'],
+                                    'distance_meters': distance,
+                                    'issue': f"Same beneficiary visits {distance:.0f}m apart (expected <500m)",
+                                    'coordinates_1': (coord1['lat'], coord1['lon']),
+                                    'coordinates_2': (coord2['lat'], coord2['lon'])
+                                })
+
+            # 4. Check for suspicious similarities between DIFFERENT beneficiaries
+            beneficiary_names = list(beneficiary_locations.keys())
+            for i, ben1 in enumerate(beneficiary_names):
+                for j, ben2 in enumerate(beneficiary_names):
+                    if i >= j or ben1 == ben2:
                         continue
-                    lat1, lon1 = row1['Visit Location (Latitude)'], row1['Visit Location (Longitude)']
-                    lat2, lon2 = row2['Visit Location (Latitude)'], row2['Visit Location (Longitude)']
-                    if pd.isna(lat1) or pd.isna(lon1) or pd.isna(lat2) or pd.isna(lon2):
-                        continue
-                    distance = geodesic((lat1, lon1), (lat2, lon2)).meters
-                    if distance < self.location_threshold_meters:
-                        similar_locations.append({
-                            'visit_1_index': i,
-                            'visit_2_index': j,
+                    
+                    ben1_data = beneficiary_locations[ben1]
+                    ben2_data = beneficiary_locations[ben2]
+                    
+                    # Calculate distance between average locations
+                    distance = geodesic((ben1_data['avg_lat'], ben1_data['avg_lon']), 
+                                      (ben2_data['avg_lat'], ben2_data['avg_lon'])).meters
+                    
+                    # Flag if different beneficiaries are suspiciously close (<150m)
+                    if distance < 150:
+                        cross_beneficiary_similarities.append({
+                            'beneficiary_1': ben1,
+                            'beneficiary_2': ben2,
                             'distance_meters': distance,
-                            'accounts': f"{row1['Account Name']} & {row2['Account Name']}"
+                            'ben1_visit_count': ben1_data['visit_count'],
+                            'ben2_visit_count': ben2_data['visit_count'],
+                            'coordinates_1': (ben1_data['avg_lat'], ben1_data['avg_lon']),
+                            'coordinates_2': (ben2_data['avg_lat'], ben2_data['avg_lon']),
+                            'issue': f"Different beneficiaries only {distance:.0f}m apart (suspicious)"
                         })
 
-            # Collect all flags
-            if similar_locations or out_of_country:
-                total_comparisons = len(trainer_visits) * (len(trainer_visits) - 1) / 2
+            # 5. Calculate severity and flag if issues found
+            total_beneficiaries = len(beneficiary_locations)
+            similarity_issues = len(cross_beneficiary_similarities)
+            consistency_issues = len(within_beneficiary_inconsistencies)
+            
+            if (cross_beneficiary_similarities or within_beneficiary_inconsistencies or out_of_country):
+                
+                # Calculate similarity percentage based on beneficiaries, not individual visits
+                if total_beneficiaries > 1:
+                    similarity_percentage = similarity_issues / (total_beneficiaries * (total_beneficiaries - 1) / 2)
+                else:
+                    similarity_percentage = 0
+
                 location_flags.append({
                     'trainer': trainer,
-                    'similarity_percentage': len(similar_locations) / max(1, total_comparisons),
-                    'similar_locations': similar_locations,
-                    'out_of_country': out_of_country,
                     'total_visits': len(trainer_visits),
-                    'flagged_pairs': len(similar_locations),
-                    'flagged_out_of_country': len(out_of_country)
+                    'total_beneficiaries': total_beneficiaries,
+                    'similarity_percentage': similarity_percentage,
+                    'cross_beneficiary_similarities': cross_beneficiary_similarities,
+                    'within_beneficiary_inconsistencies': within_beneficiary_inconsistencies,
+                    'out_of_country_visits': out_of_country,
+                    'flagged_similar_beneficiaries': len(cross_beneficiary_similarities),
+                    'flagged_inconsistent_visits': len(within_beneficiary_inconsistencies),
+                    'flagged_out_of_country': len(out_of_country),
+                    'location_concerns': {
+                        'different_beneficiaries_too_close': len(cross_beneficiary_similarities) > 0,
+                        'same_beneficiary_inconsistent': len(within_beneficiary_inconsistencies) > 0,
+                        'coordinates_outside_kenya': len(out_of_country) > 0
+                    }
                 })
 
         return location_flags
@@ -608,17 +682,37 @@ class VisitAuditSystem:
             issues_found = []
             recommendations = []
             
-            # Location confidence penalty
+            # Location confidence penalty (updated for new logic)
             if trainer in location_flags:
                 flag_data = location_flags[trainer]
-                penalty = flag_data['similarity_percentage'] * 40  # Increased penalty
+                location_concerns = flag_data.get('location_concerns', {})
+                penalty = 0
+                location_issues = []
+                
+                # Penalty for different beneficiaries too close (major red flag)
+                if location_concerns.get('different_beneficiaries_too_close'):
+                    cross_ben_penalty = len(flag_data['cross_beneficiary_similarities']) * 15
+                    penalty += cross_ben_penalty
+                    location_issues.append(f"different beneficiaries suspiciously close ({cross_ben_penalty:.0f})")
+                    recommendations.append("Verify visits were at actual beneficiary locations, not same/nearby locations")
+                
+                # Penalty for same beneficiary inconsistent locations (moderate concern)
+                if location_concerns.get('same_beneficiary_inconsistent'):
+                    inconsistent_penalty = len(flag_data['within_beneficiary_inconsistencies']) * 8
+                    penalty += inconsistent_penalty
+                    location_issues.append(f"beneficiary location inconsistencies ({inconsistent_penalty:.0f})")
+                    recommendations.append("Confirm correct beneficiary addresses and visit locations")
+                
+                # Penalty for out of country coordinates (major red flag)
+                if location_concerns.get('coordinates_outside_kenya'):
+                    country_penalty = len(flag_data['out_of_country_visits']) * 20
+                    penalty += country_penalty
+                    location_issues.append(f"coordinates outside Kenya ({country_penalty:.0f})")
+                    recommendations.append("Verify GPS coordinates are accurate and within Kenya")
+                
                 confidence_score -= penalty
-                if penalty > 1:
-                    issues_found.append(f"Location similarity concerns (-{penalty:.1f})")
-                    if flag_data.get('out_of_country'):
-                        recommendations.append("Verify GPS coordinates and actual visit location")
-                    else:
-                        recommendations.append("Confirm visit was at beneficiary's actual business location")
+                if location_issues:
+                    issues_found.append(f"Location concerns: {', '.join(location_issues)} (-{penalty:.1f})")
             
             # Story engagement penalty (enhanced)
             if trainer in story_flags:
